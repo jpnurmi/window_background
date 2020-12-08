@@ -1,14 +1,14 @@
+/// TODO
+library window_background;
 
-import 'dart:async';
+import 'dart:ui';
 
-import 'package:flutter/services.dart';
+import 'src/dylib.dart';
 
-class WindowBackground {
-  static const MethodChannel _channel =
-      const MethodChannel('window_background');
-
-  static Future<String> get platformVersion async {
-    final String version = await _channel.invokeMethod('getPlatformVersion');
-    return version;
+/// TODO
+abstract class WindowBackground {
+  /// TODO
+  static void setColor(Color color) {
+    window_background_set_color(color.value);
   }
 }

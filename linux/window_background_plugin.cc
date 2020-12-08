@@ -2,9 +2,8 @@
 
 #include <flutter_linux/flutter_linux.h>
 #include <gtk/gtk.h>
-#include <sys/utsname.h>
-
-#include <cstring>
+#include <glib.h>
+#include <gmodule.h>
 
 #define WINDOW_BACKGROUND_PLUGIN(obj) \
   (G_TYPE_CHECK_INSTANCE_CAST((obj), window_background_plugin_get_type(), \
@@ -16,29 +15,20 @@ struct _WindowBackgroundPlugin {
 
 G_DEFINE_TYPE(WindowBackgroundPlugin, window_background_plugin, g_object_get_type())
 
-// Called when a method call is received from Flutter.
-static void window_background_plugin_handle_method_call(
-    WindowBackgroundPlugin* self,
-    FlMethodCall* method_call) {
-  g_autoptr(FlMethodResponse) response = nullptr;
+static FlView* fl_view = nullptr;
 
-  const gchar* method = fl_method_call_get_name(method_call);
-
-  if (strcmp(method, "getPlatformVersion") == 0) {
-    struct utsname uname_data = {};
-    uname(&uname_data);
-    g_autofree gchar *version = g_strdup_printf("Linux %s", uname_data.version);
-    g_autoptr(FlValue) result = fl_value_new_string(version);
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
-  } else {
-    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
-  }
-
-  fl_method_call_respond(method_call, response, nullptr);
+static void view_weak_notify_cb(gpointer user_data,
+                                GObject* where_the_object_was) {
+  fl_view = nullptr;
 }
 
 static void window_background_plugin_dispose(GObject* object) {
   G_OBJECT_CLASS(window_background_plugin_parent_class)->dispose(object);
+
+  if (fl_view != nullptr) {
+    g_object_weak_unref(G_OBJECT(fl_view), view_weak_notify_cb, nullptr);
+    fl_view = nullptr;
+  }
 }
 
 static void window_background_plugin_class_init(WindowBackgroundPluginClass* klass) {
@@ -47,24 +37,60 @@ static void window_background_plugin_class_init(WindowBackgroundPluginClass* kla
 
 static void window_background_plugin_init(WindowBackgroundPlugin* self) {}
 
-static void method_call_cb(FlMethodChannel* channel, FlMethodCall* method_call,
-                           gpointer user_data) {
-  WindowBackgroundPlugin* plugin = WINDOW_BACKGROUND_PLUGIN(user_data);
-  window_background_plugin_handle_method_call(plugin, method_call);
+static void window_background_redraw() {
+  g_return_if_fail(fl_view != nullptr);
+  if (gtk_widget_get_realized(GTK_WIDGET(fl_view))) {
+    gtk_widget_queue_draw(GTK_WIDGET(fl_view));
+  }
+}
+
+static unsigned int bg = 0;
+
+extern "C" {
+  G_MODULE_EXPORT void window_background_set_color(unsigned int argb) {
+    if (bg != argb) {
+      bg = argb;
+      window_background_redraw();
+    }
+  }
+}
+
+static inline float c(int argb, int b) { return ((argb >> b) & 0xff) / 255.0; }
+static inline float r(unsigned int argb) { return c(argb, 16); }
+static inline float g(unsigned int argb) { return c(argb, 8); }
+static inline float b(unsigned int argb) { return c(argb, 0); }
+static inline float a(unsigned int argb) { return c(argb, 24); }
+
+static gboolean window_background_draw(GtkWidget *widget, cairo_t *cr, gpointer data) {
+  if (bg != 0) {
+    GtkAllocation allocation;
+    gtk_widget_get_allocation(widget, &allocation);
+    cairo_set_source_rgba(cr, r(bg), g(bg), b(bg), a(bg));
+    cairo_rectangle(cr, 0, 0, allocation.width, allocation.height);
+    cairo_fill(cr);
+  }
+  return FALSE;
+}
+
+static gchar* g_self_exe() {
+  g_autoptr(GError) error = nullptr;
+  g_autofree gchar* self_exe = g_file_read_link("/proc/self/exe", &error);
+  if (error) {
+    g_critical("g_file_read_link: %s", error->message);
+  }
+  return g_path_get_dirname(self_exe);
 }
 
 void window_background_plugin_register_with_registrar(FlPluginRegistrar* registrar) {
   WindowBackgroundPlugin* plugin = WINDOW_BACKGROUND_PLUGIN(
       g_object_new(window_background_plugin_get_type(), nullptr));
 
-  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
-  g_autoptr(FlMethodChannel) channel =
-      fl_method_channel_new(fl_plugin_registrar_get_messenger(registrar),
-                            "window_background",
-                            FL_METHOD_CODEC(codec));
-  fl_method_channel_set_method_call_handler(channel, method_call_cb,
-                                            g_object_ref(plugin),
-                                            g_object_unref);
+  fl_view = fl_plugin_registrar_get_view(registrar);
+  g_object_weak_ref(G_OBJECT(fl_view), view_weak_notify_cb, nullptr);
+  g_signal_connect(fl_view, "draw", G_CALLBACK(window_background_draw), nullptr);
 
-  g_object_unref(plugin);
+  g_autofree gchar* self_exe = g_self_exe();
+  g_autofree gchar* plugin_path =
+      g_build_filename(self_exe, "lib", "libwindow_background_plugin.so", nullptr);
+  setenv("WINDOW_BACKGROUND_PLUGIN_PATH", plugin_path, 0);
 }
